@@ -1,15 +1,11 @@
 # =================================================================
-#  pipeline.yml
-#  Place at: .github/workflows/pipeline.yml
-#
-#  Full CI/CD pipeline for customers.php — deploys to Vercel
-#  Trigger : push to main branch
-#  Stages  : Build → Test → Security Scan → Deploy (Vercel)
-#
-#  Fixed: upgraded all actions to Node.js 24 compatible versions
-#         actions/cache@v4, actions/upload-artifact@v4 (latest)
-#         added FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true
-#         fixed coverage dir creation before PHPUnit runs
+#  pipeline.yml  —  customers.php CI/CD  (Vercel deploy)
+#  Fixed v3:
+#    - FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 suppresses Node warnings
+#    - Removed xdebug coverage from test stage (was causing exit 1)
+#    - Removed upload-artifact for coverage (nothing to upload)
+#    - cache key uses composer.json (lock file not committed)
+#    - setup.sql uses INSERT IGNORE (safe to re-seed)
 # =================================================================
 
 name: customers.php CI/CD Pipeline
@@ -21,10 +17,10 @@ on:
 
 env:
   PHP_VERSION: "8.2"
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # opt into Node.js 24 now
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # =================================================================
-#  STAGE 1 — BUILD
+#  STAGE 1 — BUILD & LINT
 # =================================================================
 jobs:
 
@@ -44,12 +40,11 @@ jobs:
           coverage: none
 
       - name: Cache Composer packages
-        uses: actions/cache@v4        # upgraded from v3 → v4
+        uses: actions/cache@v4
         with:
           path: vendor/
           key: composer-${{ runner.os }}-${{ hashFiles('composer.json') }}
-          restore-keys: |
-            composer-${{ runner.os }}-
+          restore-keys: composer-${{ runner.os }}-
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --optimize-autoloader
@@ -63,7 +58,7 @@ jobs:
           echo "All PHP files passed lint."
 
 # =================================================================
-#  STAGE 2 — TEST
+#  STAGE 2 — UNIT & INTEGRATION TESTS
 # =================================================================
 
   test:
@@ -102,15 +97,14 @@ jobs:
         with:
           php-version: ${{ env.PHP_VERSION }}
           extensions: pdo, pdo_mysql, mbstring
-          coverage: xdebug
+          coverage: none              # no coverage here — keeps test stage fast and clean
 
       - name: Cache Composer packages
-        uses: actions/cache@v4        # upgraded from v3 → v4
+        uses: actions/cache@v4
         with:
           path: vendor/
           key: composer-${{ runner.os }}-${{ hashFiles('composer.json') }}
-          restore-keys: |
-            composer-${{ runner.os }}-
+          restore-keys: composer-${{ runner.os }}-
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist
@@ -126,24 +120,14 @@ jobs:
       - name: Seed test database
         run: mysql -h 127.0.0.1 -u test_user -ptest_pass test_db < setup.sql
 
-      - name: Create coverage output directory
-        run: mkdir -p coverage          # fixed: PHPUnit needs this dir to exist
-
       - name: Run unit tests
         run: vendor/bin/phpunit tests/unit --testdox
 
       - name: Run integration tests
         run: vendor/bin/phpunit tests/integration --testdox
 
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-report
-          path: coverage/
-
 # =================================================================
-#  STAGE 3 — SECURITY SCAN
+#  STAGE 3 — OWASP SECURITY SCAN
 # =================================================================
 
   security:
@@ -159,6 +143,14 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: vendor/
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.json') }}
+          restore-keys: composer-${{ runner.os }}-
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist
@@ -207,9 +199,7 @@ jobs:
             --token=${{ secrets.VERCEL_TOKEN }}
 
       - name: Build project with Vercel
-        run: |
-          vercel build --prod \
-            --token=${{ secrets.VERCEL_TOKEN }}
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
 
       - name: Deploy to Vercel production
         id: deploy
@@ -239,7 +229,7 @@ jobs:
           fi
           BODY=$(curl -s --max-time 30 "$URL")
           if ! echo "$BODY" | grep -qi "<table"; then
-            echo "SMOKE TEST FAILED — no table found in response"
+            echo "SMOKE TEST FAILED — no table in response"
             vercel rollback --token=${{ secrets.VERCEL_TOKEN }} --yes
             exit 1
           fi
