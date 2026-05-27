@@ -1,6 +1,6 @@
 {
     "name": "students/customers-php",
-    "description": "Cloud Application Development Practical Test — PHP PDO MySQL app",
+    "description": "Cloud Application Development Practical Test",
     "type": "project",
     "require": {
         "php": ">=8.2",
@@ -12,23 +12,15 @@
         "phpunit/phpunit": "^11.0"
     },
     "autoload": {
-        "psr-4": {
-            "App\\": "src/"
-        }
+        "psr-4": { "App\\": "src/" }
     },
     "autoload-dev": {
-        "psr-4": {
-            "Tests\\": "tests/"
-        }
+        "psr-4": { "Tests\\": "tests/" }
     },
     "scripts": {
         "test":      "phpunit tests/ --testdox",
         "test:unit": "phpunit tests/unit --testdox",
         "test:int":  "phpunit tests/integration --testdox",
         "lint":      "find . -name '*.php' -not -path './vendor/*' -exec php -l {} +"
-    },
-    "config": {
-        "optimize-autoloader": true,
-        "sort-packages": true
     }
 }

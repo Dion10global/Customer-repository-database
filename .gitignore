@@ -1,20 +1,11 @@
-# Composer
 vendor/
 composer.lock
-
-# Test output
 coverage/
 owasp-report/
-
-# Environment files (never commit secrets)
 .env
 .env.local
-
-# OS files
+.vercel
 .DS_Store
 Thumbs.db
-
-# IDE files
 .vscode/settings.json
 .idea/
-*.swp

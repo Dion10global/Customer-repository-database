@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "*.php",
+      "use": "@vercel/php"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/customers",
+      "dest": "/customers.php"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/$1"
+    }
+  ],
+  "env": {
+    "DB_HOST":   "@db_host",
+    "DB_NAME":   "@db_name",
+    "DB_USER":   "@db_user",
+    "DB_PASS":   "@db_pass"
+  }
+}
