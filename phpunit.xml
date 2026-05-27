@@ -2,7 +2,9 @@
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
          bootstrap="vendor/autoload.php"
-         colors="true">
+         colors="true"
+         stopOnFailure="false">
+
     <testsuites>
         <testsuite name="Unit">
             <directory>tests/unit</directory>
@@ -11,9 +13,11 @@
             <directory>tests/integration</directory>
         </testsuite>
     </testsuites>
+
     <coverage>
         <report>
             <html outputDirectory="coverage"/>
         </report>
     </coverage>
+
 </phpunit>

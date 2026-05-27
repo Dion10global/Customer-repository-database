@@ -1,0 +1,67 @@
+# =================================================================
+#  nightly-security.yml
+#  Place at: .github/workflows/nightly-security.yml
+#
+#  Runs the OWASP Dependency-Check scan every night at midnight.
+#  New CVEs are published daily — this catches vulnerabilities
+#  that appear after your last push, even if you haven't changed
+#  any code.
+#
+#  Can also be triggered manually from the GitHub Actions tab.
+# =================================================================
+
+name: Nightly Security Scan
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # Every day at 00:00 UTC
+  workflow_dispatch:        # Allow manual trigger from GitHub UI
+
+env:
+  PHP_VERSION: "8.2"
+
+jobs:
+
+  owasp-scan:
+    name: "OWASP Dependency-Check"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ env.PHP_VERSION }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "customers-php"
+          path: "."
+          format: "HTML"
+          out: "owasp-report"
+          args: >
+            --failOnCVSS 7
+            --enableRetired
+            --exclude "**/tests/**"
+            --exclude "**/vendor/phpunit/**"
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-owasp-report-${{ github.run_number }}
+          path: owasp-report/
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Nightly security scan FAILED."
+          echo "::error::Download the OWASP report artifact to see which packages are affected."
+          echo "::error::Update the vulnerable package in composer.json and push to fix."
