@@ -1,0 +1,289 @@
+# =================================================================
+#  pipeline.yml
+#  Place at: .github/workflows/pipeline.yml
+#
+#  Full CI/CD pipeline for customers.php
+#  Trigger : push to main branch
+#  Stages  : Build → Test → Security Scan → Blue-Green Deploy
+# =================================================================
+
+name: customers.php CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  PHP_VERSION: "8.2"
+  HEROKU_BLUE_APP:  customers-blue
+  HEROKU_GREEN_APP: customers-green
+  HEROKU_ROUTER_APP: customers-php-app
+
+# =================================================================
+#  STAGE 1 — BUILD
+#  Installs PHP dependencies via Composer and lints all .php files
+# =================================================================
+jobs:
+
+  build:
+    name: "Build & Lint"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ env.PHP_VERSION }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo, pdo_mysql, mbstring
+          coverage: none
+
+      - name: Cache Composer packages
+        uses: actions/cache@v3
+        with:
+          path: vendor/
+          key: composer-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Lint all PHP files
+        run: |
+          echo "Checking PHP syntax..."
+          find . -name "*.php" -not -path "./vendor/*" | while read file; do
+            php -l "$file" || exit 1
+          done
+          echo "All PHP files passed lint."
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: |
+            .
+            !.git
+            !tests/
+
+# =================================================================
+#  STAGE 2 — TEST
+#  Runs PHPUnit unit tests and integration tests against a
+#  real MySQL service container seeded with setup.sql
+# =================================================================
+
+  test:
+    name: "Unit & Integration Tests"
+    runs-on: ubuntu-latest
+    needs: build
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_secret
+          MYSQL_DATABASE: test_db
+          MYSQL_USER: test_user
+          MYSQL_PASSWORD: test_pass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_NAME: test_db
+      DB_USER: test_user
+      DB_PASS: test_pass
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ env.PHP_VERSION }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo, pdo_mysql, mbstring
+          coverage: xdebug
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Wait for MySQL to be ready
+        run: |
+          until mysqladmin ping -h 127.0.0.1 -u test_user -ptest_pass --silent; do
+            echo "Waiting for MySQL..."
+            sleep 2
+          done
+          echo "MySQL is ready."
+
+      - name: Seed test database
+        run: mysql -h 127.0.0.1 -u test_user -ptest_pass test_db < setup.sql
+
+      - name: Run unit tests
+        run: vendor/bin/phpunit tests/unit --testdox
+
+      - name: Run integration tests
+        run: vendor/bin/phpunit tests/integration --testdox
+
+      - name: Upload test coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+# =================================================================
+#  STAGE 3 — SECURITY SCAN
+#  OWASP Dependency-Check scans all Composer packages against
+#  the NVD. Fails if any CVE has CVSS score >= 7 (High/Critical)
+# =================================================================
+
+  security:
+    name: "OWASP Security Scan"
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP & install dependencies
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "customers-php"
+          path: "."
+          format: "HTML"
+          out: "owasp-report"
+          args: >
+            --failOnCVSS 7
+            --enableRetired
+            --exclude "**/tests/**"
+            --exclude "**/vendor/phpunit/**"
+
+      - name: Upload OWASP report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: owasp-security-report
+          path: owasp-report/
+
+# =================================================================
+#  STAGE 4 — DEPLOY (Blue-Green, Zero Downtime)
+#
+#  1. Detect which slot (blue/green) is currently LIVE
+#  2. Deploy new build to the INACTIVE slot
+#  3. Smoke test the inactive slot
+#  4. If smoke tests pass → flip router to new slot
+#  5. If smoke tests fail → abort, live slot is unchanged
+# =================================================================
+
+  deploy:
+    name: "Blue-Green Deploy"
+    runs-on: ubuntu-latest
+    needs: security
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Heroku CLI
+        run: |
+          curl https://cli-assets.heroku.com/install.sh | sh
+          heroku --version
+
+      - name: Authenticate Heroku
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: heroku auth:token
+
+      - name: Detect active and inactive slots
+        id: slots
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          ACTIVE=$(heroku config:get ACTIVE_SLOT --app ${{ env.HEROKU_ROUTER_APP }})
+          echo "Current live slot: $ACTIVE"
+          if [ "$ACTIVE" = "blue" ]; then
+            echo "DEPLOY_TO=green"   >> $GITHUB_OUTPUT
+            echo "STANDBY=blue"      >> $GITHUB_OUTPUT
+            echo "DEPLOY_APP=${{ env.HEROKU_GREEN_APP }}" >> $GITHUB_OUTPUT
+          else
+            echo "DEPLOY_TO=blue"    >> $GITHUB_OUTPUT
+            echo "STANDBY=green"     >> $GITHUB_OUTPUT
+            echo "DEPLOY_APP=${{ env.HEROKU_BLUE_APP }}"  >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to inactive slot
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          DEPLOY_APP="${{ steps.slots.outputs.DEPLOY_APP }}"
+          echo "Deploying to: $DEPLOY_APP"
+          git remote add heroku-target \
+            https://heroku:${HEROKU_API_KEY}@git.heroku.com/${DEPLOY_APP}.git
+          git push heroku-target main --force
+          echo "Deploy to $DEPLOY_APP complete. Running smoke tests..."
+
+      - name: Smoke test inactive slot
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          DEPLOY_APP="${{ steps.slots.outputs.DEPLOY_APP }}"
+          URL="https://${DEPLOY_APP}.herokuapp.com/customers.php"
+          echo "Smoke testing: $URL"
+
+          # Check HTTP 200
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL")
+          if [ "$HTTP" != "200" ]; then
+            echo "FAILED: Got HTTP $HTTP — aborting. Live slot unchanged."
+            exit 1
+          fi
+
+          # Check page contains a table
+          BODY=$(curl -s --max-time 30 "$URL")
+          if ! echo "$BODY" | grep -qi "<table"; then
+            echo "FAILED: No table in response — aborting. Live slot unchanged."
+            exit 1
+          fi
+
+          echo "Smoke tests passed on $DEPLOY_APP."
+
+      - name: Flip live traffic to new slot
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          NEW_SLOT="${{ steps.slots.outputs.DEPLOY_TO }}"
+          heroku config:set ACTIVE_SLOT=$NEW_SLOT \
+            --app ${{ env.HEROKU_ROUTER_APP }}
+          echo "Traffic now live on: $NEW_SLOT"
+          echo "Standby slot: ${{ steps.slots.outputs.STANDBY }}"
+
+      - name: Print deployment summary
+        run: |
+          echo "================================================"
+          echo "  DEPLOYMENT SUCCESSFUL"
+          echo "  Live slot : ${{ steps.slots.outputs.DEPLOY_TO }}"
+          echo "  Standby   : ${{ steps.slots.outputs.STANDBY }}"
+          echo "  Commit    : ${{ github.sha }}"
+          echo "  Triggered : ${{ github.actor }}"
+          echo "================================================"
