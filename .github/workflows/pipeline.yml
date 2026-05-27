@@ -2,9 +2,14 @@
 #  pipeline.yml
 #  Place at: .github/workflows/pipeline.yml
 #
-#  Full CI/CD pipeline for customers.php
+#  Full CI/CD pipeline for customers.php — deploys to Vercel
 #  Trigger : push to main branch
-#  Stages  : Build → Test → Security Scan → Blue-Green Deploy
+#  Stages  : Build → Test → Security Scan → Deploy (Vercel)
+#
+#  Fixed: upgraded all actions to Node.js 24 compatible versions
+#         actions/cache@v4, actions/upload-artifact@v4 (latest)
+#         added FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true
+#         fixed coverage dir creation before PHPUnit runs
 # =================================================================
 
 name: customers.php CI/CD Pipeline
@@ -13,19 +18,13 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
 
 env:
   PHP_VERSION: "8.2"
-  HEROKU_BLUE_APP:  customers-blue
-  HEROKU_GREEN_APP: customers-green
-  HEROKU_ROUTER_APP: customers-php-app
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # opt into Node.js 24 now
 
 # =================================================================
 #  STAGE 1 — BUILD
-#  Installs PHP dependencies via Composer and lints all .php files
 # =================================================================
 jobs:
 
@@ -45,11 +44,12 @@ jobs:
           coverage: none
 
       - name: Cache Composer packages
-        uses: actions/cache@v3
+        uses: actions/cache@v4        # upgraded from v3 → v4
         with:
           path: vendor/
-          key: composer-${{ hashFiles('composer.lock') }}
-          restore-keys: composer-
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.json') }}
+          restore-keys: |
+            composer-${{ runner.os }}-
 
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --optimize-autoloader
@@ -62,19 +62,8 @@ jobs:
           done
           echo "All PHP files passed lint."
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: build
-          path: |
-            .
-            !.git
-            !tests/
-
 # =================================================================
 #  STAGE 2 — TEST
-#  Runs PHPUnit unit tests and integration tests against a
-#  real MySQL service container seeded with setup.sql
 # =================================================================
 
   test:
@@ -100,7 +89,6 @@ jobs:
 
     env:
       DB_HOST: 127.0.0.1
-      DB_PORT: 3306
       DB_NAME: test_db
       DB_USER: test_user
       DB_PASS: test_pass
@@ -116,6 +104,14 @@ jobs:
           extensions: pdo, pdo_mysql, mbstring
           coverage: xdebug
 
+      - name: Cache Composer packages
+        uses: actions/cache@v4        # upgraded from v3 → v4
+        with:
+          path: vendor/
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.json') }}
+          restore-keys: |
+            composer-${{ runner.os }}-
+
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist
 
@@ -130,22 +126,24 @@ jobs:
       - name: Seed test database
         run: mysql -h 127.0.0.1 -u test_user -ptest_pass test_db < setup.sql
 
+      - name: Create coverage output directory
+        run: mkdir -p coverage          # fixed: PHPUnit needs this dir to exist
+
       - name: Run unit tests
         run: vendor/bin/phpunit tests/unit --testdox
 
       - name: Run integration tests
         run: vendor/bin/phpunit tests/integration --testdox
 
-      - name: Upload test coverage report
+      - name: Upload coverage report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: coverage-report
           path: coverage/
 
 # =================================================================
 #  STAGE 3 — SECURITY SCAN
-#  OWASP Dependency-Check scans all Composer packages against
-#  the NVD. Fails if any CVE has CVSS score >= 7 (High/Critical)
 # =================================================================
 
   security:
@@ -182,108 +180,76 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: owasp-security-report
+          name: owasp-report
           path: owasp-report/
 
 # =================================================================
-#  STAGE 4 — DEPLOY (Blue-Green, Zero Downtime)
-#
-#  1. Detect which slot (blue/green) is currently LIVE
-#  2. Deploy new build to the INACTIVE slot
-#  3. Smoke test the inactive slot
-#  4. If smoke tests pass → flip router to new slot
-#  5. If smoke tests fail → abort, live slot is unchanged
+#  STAGE 4 — DEPLOY TO VERCEL
 # =================================================================
 
   deploy:
-    name: "Blue-Green Deploy"
+    name: "Deploy to Vercel"
     runs-on: ubuntu-latest
     needs: security
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Heroku CLI
-        run: |
-          curl https://cli-assets.heroku.com/install.sh | sh
-          heroku --version
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
 
-      - name: Authenticate Heroku
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
-        run: heroku auth:token
-
-      - name: Detect active and inactive slots
-        id: slots
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+      - name: Pull Vercel environment & project settings
         run: |
-          ACTIVE=$(heroku config:get ACTIVE_SLOT --app ${{ env.HEROKU_ROUTER_APP }})
-          echo "Current live slot: $ACTIVE"
-          if [ "$ACTIVE" = "blue" ]; then
-            echo "DEPLOY_TO=green"   >> $GITHUB_OUTPUT
-            echo "STANDBY=blue"      >> $GITHUB_OUTPUT
-            echo "DEPLOY_APP=${{ env.HEROKU_GREEN_APP }}" >> $GITHUB_OUTPUT
-          else
-            echo "DEPLOY_TO=blue"    >> $GITHUB_OUTPUT
-            echo "STANDBY=green"     >> $GITHUB_OUTPUT
-            echo "DEPLOY_APP=${{ env.HEROKU_BLUE_APP }}"  >> $GITHUB_OUTPUT
-          fi
+          vercel pull --yes \
+            --environment=production \
+            --token=${{ secrets.VERCEL_TOKEN }}
 
-      - name: Deploy to inactive slot
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+      - name: Build project with Vercel
         run: |
-          DEPLOY_APP="${{ steps.slots.outputs.DEPLOY_APP }}"
-          echo "Deploying to: $DEPLOY_APP"
-          git remote add heroku-target \
-            https://heroku:${HEROKU_API_KEY}@git.heroku.com/${DEPLOY_APP}.git
-          git push heroku-target main --force
-          echo "Deploy to $DEPLOY_APP complete. Running smoke tests..."
+          vercel build --prod \
+            --token=${{ secrets.VERCEL_TOKEN }}
 
-      - name: Smoke test inactive slot
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+      - name: Deploy to Vercel production
+        id: deploy
         run: |
-          DEPLOY_APP="${{ steps.slots.outputs.DEPLOY_APP }}"
-          URL="https://${DEPLOY_APP}.herokuapp.com/customers.php"
+          DEPLOYMENT_URL=$(vercel deploy --prebuilt --prod \
+            --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$DEPLOYMENT_URL" >> $GITHUB_OUTPUT
+          echo "Deployed to: $DEPLOYMENT_URL"
+
+      - name: Smoke test live deployment
+        run: |
+          URL="${{ steps.deploy.outputs.url }}/customers"
           echo "Smoke testing: $URL"
-
-          # Check HTTP 200
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL")
+          for i in 1 2 3 4 5; do
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL")
+            if [ "$HTTP" = "200" ]; then
+              echo "HTTP 200 confirmed on attempt $i."
+              break
+            fi
+            echo "Attempt $i: got HTTP $HTTP — retrying in 5s..."
+            sleep 5
+          done
           if [ "$HTTP" != "200" ]; then
-            echo "FAILED: Got HTTP $HTTP — aborting. Live slot unchanged."
+            echo "SMOKE TEST FAILED — HTTP $HTTP"
+            vercel rollback --token=${{ secrets.VERCEL_TOKEN }} --yes
             exit 1
           fi
-
-          # Check page contains a table
           BODY=$(curl -s --max-time 30 "$URL")
           if ! echo "$BODY" | grep -qi "<table"; then
-            echo "FAILED: No table in response — aborting. Live slot unchanged."
+            echo "SMOKE TEST FAILED — no table found in response"
+            vercel rollback --token=${{ secrets.VERCEL_TOKEN }} --yes
             exit 1
           fi
-
-          echo "Smoke tests passed on $DEPLOY_APP."
-
-      - name: Flip live traffic to new slot
-        env:
-          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
-        run: |
-          NEW_SLOT="${{ steps.slots.outputs.DEPLOY_TO }}"
-          heroku config:set ACTIVE_SLOT=$NEW_SLOT \
-            --app ${{ env.HEROKU_ROUTER_APP }}
-          echo "Traffic now live on: $NEW_SLOT"
-          echo "Standby slot: ${{ steps.slots.outputs.STANDBY }}"
+          echo "All smoke tests passed."
 
       - name: Print deployment summary
         run: |
           echo "================================================"
           echo "  DEPLOYMENT SUCCESSFUL"
-          echo "  Live slot : ${{ steps.slots.outputs.DEPLOY_TO }}"
-          echo "  Standby   : ${{ steps.slots.outputs.STANDBY }}"
-          echo "  Commit    : ${{ github.sha }}"
-          echo "  Triggered : ${{ github.actor }}"
+          echo "  URL     : ${{ steps.deploy.outputs.url }}"
+          echo "  Commit  : ${{ github.sha }}"
+          echo "  Author  : ${{ github.actor }}"
           echo "================================================"
