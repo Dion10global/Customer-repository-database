@@ -1,9 +1,9 @@
 <?php
 // tests/integration/DatabaseTest.php
 // Integration tests — require a live MySQL connection
-// DB credentials are read from environment variables set by the pipeline
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\Test;
 
 class DatabaseTest extends TestCase
 {
@@ -28,13 +28,13 @@ class DatabaseTest extends TestCase
         );
     }
 
-    /** @test */
+    #[Test]
     public function database_connection_succeeds(): void
     {
         $this->assertInstanceOf(PDO::class, $this->pdo);
     }
 
-    /** @test */
+    #[Test]
     public function customers_table_exists(): void
     {
         $stmt = $this->pdo->query("SHOW TABLES LIKE 'customers'");
@@ -42,7 +42,7 @@ class DatabaseTest extends TestCase
         $this->assertNotEmpty($tables, "Table 'customers' should exist in test_db");
     }
 
-    /** @test */
+    #[Test]
     public function customers_table_has_correct_columns(): void
     {
         $stmt = $this->pdo->query("DESCRIBE customers");
@@ -53,7 +53,7 @@ class DatabaseTest extends TestCase
         $this->assertContains('created_at', $columns);
     }
 
-    /** @test */
+    #[Test]
     public function can_fetch_all_customers_with_prepared_statement(): void
     {
         $stmt = $this->pdo->prepare(
@@ -63,14 +63,14 @@ class DatabaseTest extends TestCase
         $rows = $stmt->fetchAll();
 
         $this->assertIsArray($rows);
-        $this->assertGreaterThan(0, count($rows), "Should return at least one customer");
+        $this->assertGreaterThan(0, count($rows));
         $this->assertArrayHasKey('id',         $rows[0]);
         $this->assertArrayHasKey('name',       $rows[0]);
         $this->assertArrayHasKey('email',      $rows[0]);
         $this->assertArrayHasKey('created_at', $rows[0]);
     }
 
-    /** @test */
+    #[Test]
     public function prepared_statement_resists_sql_injection(): void
     {
         $injection = "' OR '1'='1";
@@ -82,7 +82,7 @@ class DatabaseTest extends TestCase
         $this->assertEmpty($result, "SQL injection attempt should return no rows");
     }
 
-    /** @test */
+    #[Test]
     public function email_field_is_unique(): void
     {
         $stmt = $this->pdo->query(

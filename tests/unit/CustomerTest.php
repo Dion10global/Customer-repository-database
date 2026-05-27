@@ -3,10 +3,11 @@
 // Unit tests — no database required, tests pure PHP logic only
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\Test;
 
 class CustomerTest extends TestCase
 {
-    /** @test */
+    #[Test]
     public function valid_email_passes_validation(): void
     {
         $email = 'alice@example.com';
@@ -16,7 +17,7 @@ class CustomerTest extends TestCase
         );
     }
 
-    /** @test */
+    #[Test]
     public function invalid_email_fails_validation(): void
     {
         $email = 'not-an-email';
@@ -26,14 +27,14 @@ class CustomerTest extends TestCase
         );
     }
 
-    /** @test */
+    #[Test]
     public function customer_name_cannot_be_empty(): void
     {
         $name = 'Alice Moyo';
         $this->assertNotEmpty(trim($name));
     }
 
-    /** @test */
+    #[Test]
     public function xss_script_tags_are_escaped(): void
     {
         $malicious = '<script>alert("xss")</script>';
@@ -42,7 +43,7 @@ class CustomerTest extends TestCase
         $this->assertStringContainsString('&lt;script&gt;', $safe);
     }
 
-    /** @test */
+    #[Test]
     public function html_entities_are_escaped_in_name(): void
     {
         $name = 'O\'Brien & "Associates"';
@@ -51,7 +52,7 @@ class CustomerTest extends TestCase
         $this->assertStringNotContainsString("'", $safe);
     }
 
-    /** @test */
+    #[Test]
     public function integer_cast_prevents_id_injection(): void
     {
         $rawId = '1 OR 1=1';
